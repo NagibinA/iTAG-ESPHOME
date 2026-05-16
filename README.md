@@ -1,5 +1,6 @@
 # iTAG BLE Tracker для Home Assistant
 
+![](icon.png)
 
 Полноценная интеграция для отслеживания BLE-устройств iTAG через ESP32 с поддержкой всех функций.
 
