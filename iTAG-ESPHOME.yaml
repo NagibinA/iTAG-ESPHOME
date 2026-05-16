@@ -23,21 +23,25 @@ wifi:
 captive_portal:
 
 esp32_ble_tracker:
-  # Пассивное сканирование для обнаружения рекламных пакетов
   on_ble_advertise:
     then:
       - lambda: |-
           if (x.address_str() == "5B:86:CF:15:45:BA") {
             id(itag_last_seen) = millis();
-            id(itag_passive_rssi).publish_state(x.get_rssi());
+            id(itag_passive_rssi_value) = x.get_rssi();
+            
+            // Обновляем основной RSSI только если активный режим выключен
+            if (!id(itag_active_mode).state) {
+              id(itag_rssi).publish_state(x.get_rssi());
+            }
+            
             ESP_LOGD("iTAG", "Passive scan - RSSI: %d dBm", x.get_rssi());
           }
 
-# BLE клиент с отключенным авто-подключением
 ble_client:
   - mac_address: "5B:86:CF:15:45:BA"
     id: itag_device
-    auto_connect: false  # Ключевая настройка - не подключаемся автоматически
+    auto_connect: false
     on_connect:
       then:
         - binary_sensor.template.publish:
@@ -53,14 +57,17 @@ ble_client:
         - lambda: |-
             ESP_LOGI("iTAG", "Активный режим: ВЫКЛЮЧЕН");
 
-# Глобальные переменные для пассивного режима
 globals:
   - id: itag_last_seen
     type: int
     restore_value: no
     initial_value: '0'
+  
+  - id: itag_passive_rssi_value
+    type: int
+    restore_value: no
+    initial_value: '-120'
 
-# Бинарные сенсоры
 binary_sensor:
   - platform: template
     id: itag_button
@@ -74,7 +81,6 @@ binary_sensor:
     name: "Брелок находится"
     device_class: presence
     lambda: |-
-      // Дома, если активно подключение ИЛИ брелок видели в последние 60 секунд
       if (id(itag_active_mode).state && id(itag_device).connected()) {
         return true;
       }
@@ -83,7 +89,6 @@ binary_sensor:
       }
       return false;
 
-# Выключатель для управления активным режимом
 switch:
   - platform: template
     name: "Активный режим"
@@ -94,10 +99,17 @@ switch:
       - ble_client.connect: itag_device
       - lambda: |-
           ESP_LOGI("iTAG", "Активный режим ВКЛЮЧЕН");
+          // При включении активного режима, ждем подключения и RSSI обновится автоматически
     turn_off_action:
       - ble_client.disconnect: itag_device
       - lambda: |-
           ESP_LOGI("iTAG", "Активный режим ВЫКЛЮЧЕН");
+          // При выключении возвращаем последнее пассивное значение RSSI
+          if (id(itag_last_seen) > 0 && (millis() - id(itag_last_seen)) < 60000) {
+            id(itag_rssi).publish_state(id(itag_passive_rssi_value));
+          } else {
+            id(itag_rssi).publish_state(-120);
+          }
 
   - platform: template
     name: "Найти брелок"
@@ -126,30 +138,54 @@ switch:
       - lambda: |-
           ESP_LOGD("iTAG", "Поиск отключен");
 
-# Сенсоры
 sensor:
-  # Пассивный RSSI (всегда работает)
+  # Основной RSSI сенсор (объединяет пассивный и активный режимы)
   - platform: template
     name: "RSSI"
-    id: itag_passive_rssi
+    id: itag_rssi
     unit_of_measurement: "dBm"
     icon: "mdi:signal"
     update_interval: 30s
     lambda: |-
-      if (id(itag_last_seen) > 0 && (millis() - id(itag_last_seen)) < 60000) {
-        return id(itag_passive_rssi).state;
+      // Если активный режим включен и устройство подключено, используем активный RSSI
+      if (id(itag_active_mode).state && id(itag_device).connected()) {
+        return id(itag_active_rssi).state;
       }
+      // Иначе используем пассивный RSSI (если недавно видели)
+      else if (id(itag_last_seen) > 0 && (millis() - id(itag_last_seen)) < 60000) {
+        return id(itag_passive_rssi_value);
+      }
+      // Иначе сигнал потерян
       return -120;
+
+  # Пассивный RSSI (хранит последнее значение)
+  - platform: template
+    id: itag_passive_rssi
+    internal: true
+    unit_of_measurement: "dBm"
+    icon: "mdi:signal"
+    update_interval: never
+    lambda: |-
+      return id(itag_passive_rssi_value);
 
   # Активный RSSI (работает только при подключении)
   - platform: ble_client
     type: rssi
     ble_client_id: itag_device
-    name: "iTAG RSSI Active"
-    update_interval: 30s
-    internal: true  # Скрываем, используем только для отладки
+    id: itag_active_rssi
+    name: "RSSI Active"
+    update_interval: 5s  # Чаще обновляем для активного режима
+    internal: true  # Скрываем, используем только для логики
+    on_value:
+      then:
+        - lambda: |-
+            // При получении нового активного RSSI, обновляем основной сенсор
+            if (id(itag_active_mode).state && id(itag_device).connected()) {
+              id(itag_rssi).publish_state(x);
+              ESP_LOGD("iTAG", "Active RSSI updated: %d dBm", x);
+            }
 
-  # Обработчик кнопки (только при активном режиме)
+  # Обработчик кнопки
   - platform: ble_client
     type: characteristic
     ble_client_id: itag_device
@@ -168,7 +204,7 @@ sensor:
             id: itag_button
             state: OFF
 
-  # Батарея (только при активном режиме)
+  # Батарея
   - platform: ble_client
     type: characteristic
     ble_client_id: itag_device
