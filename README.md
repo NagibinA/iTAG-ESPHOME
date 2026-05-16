@@ -140,4 +140,4 @@ MIT
 
 ## Автор
 
-
+[NagibinA](https://github.com/NagibinA)
