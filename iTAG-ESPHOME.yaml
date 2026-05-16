@@ -1,0 +1,186 @@
+esphome:
+  name: itag-tracker
+  friendly_name: iTAG Tracker
+
+esp32:
+  board: esp32-c3-devkitm-1
+  framework:
+    type: esp-idf
+
+logger:
+
+api:
+  encryption:
+    key: "ВАШ_КЛЮЧ"
+
+ota:
+  password: "ВАШ_ПАРОЛЬ"
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+captive_portal:
+
+esp32_ble_tracker:
+  # Пассивное сканирование для обнаружения рекламных пакетов
+  on_ble_advertise:
+    then:
+      - lambda: |-
+          if (x.address_str() == "5B:86:CF:15:45:BA") {
+            id(itag_last_seen) = millis();
+            id(itag_passive_rssi).publish_state(x.get_rssi());
+            ESP_LOGD("iTAG", "Passive scan - RSSI: %d dBm", x.get_rssi());
+          }
+
+# BLE клиент с отключенным авто-подключением
+ble_client:
+  - mac_address: "5B:86:CF:15:45:BA"
+    id: itag_device
+    auto_connect: false  # Ключевая настройка - не подключаемся автоматически
+    on_connect:
+      then:
+        - binary_sensor.template.publish:
+            id: itag_presence
+            state: ON
+        - lambda: |-
+            ESP_LOGI("iTAG", "Активный режим: ВКЛЮЧЕН, брелок подключен");
+    on_disconnect:
+      then:
+        - binary_sensor.template.publish:
+            id: itag_presence
+            state: OFF
+        - lambda: |-
+            ESP_LOGI("iTAG", "Активный режим: ВЫКЛЮЧЕН");
+
+# Глобальные переменные для пассивного режима
+globals:
+  - id: itag_last_seen
+    type: int
+    restore_value: no
+    initial_value: '0'
+
+# Бинарные сенсоры
+binary_sensor:
+  - platform: template
+    id: itag_button
+    name: "Кнопка"
+    device_class: power
+    filters:
+      - delayed_off: 200ms
+
+  - platform: template
+    id: itag_presence
+    name: "Брелок находится"
+    device_class: presence
+    lambda: |-
+      // Дома, если активно подключение ИЛИ брелок видели в последние 60 секунд
+      if (id(itag_active_mode).state && id(itag_device).connected()) {
+        return true;
+      }
+      if (id(itag_last_seen) > 0 && (millis() - id(itag_last_seen)) < 60000) {
+        return true;
+      }
+      return false;
+
+# Выключатель для управления активным режимом
+switch:
+  - platform: template
+    name: "Активный режим"
+    id: itag_active_mode
+    icon: "mdi:bluetooth"
+    optimistic: true
+    turn_on_action:
+      - ble_client.connect: itag_device
+      - lambda: |-
+          ESP_LOGI("iTAG", "Активный режим ВКЛЮЧЕН");
+    turn_off_action:
+      - ble_client.disconnect: itag_device
+      - lambda: |-
+          ESP_LOGI("iTAG", "Активный режим ВЫКЛЮЧЕН");
+
+  - platform: template
+    name: "Найти брелок"
+    id: find_itag
+    icon: "mdi:map-marker"
+    turn_on_action:
+      - if:
+          condition:
+            - switch.is_on: itag_active_mode
+          then:
+            - ble_client.ble_write:
+                id: itag_device
+                service_uuid: '1802'
+                characteristic_uuid: '2a06'
+                value: [0x01]
+            - delay: 500ms
+            - ble_client.ble_write:
+                id: itag_device
+                service_uuid: '1802'
+                characteristic_uuid: '2a06'
+                value: [0x00]
+          else:
+            - lambda: |-
+                ESP_LOGW("iTAG", "Не могу найти брелок - активный режим выключен");
+    turn_off_action:
+      - lambda: |-
+          ESP_LOGD("iTAG", "Поиск отключен");
+
+# Сенсоры
+sensor:
+  # Пассивный RSSI (всегда работает)
+  - platform: template
+    name: "RSSI"
+    id: itag_passive_rssi
+    unit_of_measurement: "dBm"
+    icon: "mdi:signal"
+    update_interval: 30s
+    lambda: |-
+      if (id(itag_last_seen) > 0 && (millis() - id(itag_last_seen)) < 60000) {
+        return id(itag_passive_rssi).state;
+      }
+      return -120;
+
+  # Активный RSSI (работает только при подключении)
+  - platform: ble_client
+    type: rssi
+    ble_client_id: itag_device
+    name: "iTAG RSSI Active"
+    update_interval: 30s
+    internal: true  # Скрываем, используем только для отладки
+
+  # Обработчик кнопки (только при активном режиме)
+  - platform: ble_client
+    type: characteristic
+    ble_client_id: itag_device
+    name: "Button_flag"
+    internal: true
+    service_uuid: 'ffe0'
+    characteristic_uuid: 'ffe1'
+    notify: true
+    update_interval: never
+    on_notify:
+      then:
+        - binary_sensor.template.publish:
+            id: itag_button
+            state: ON
+        - binary_sensor.template.publish:
+            id: itag_button
+            state: OFF
+
+  # Батарея (только при активном режиме)
+  - platform: ble_client
+    type: characteristic
+    ble_client_id: itag_device
+    name: "Батарейка"
+    service_uuid: '180f'
+    characteristic_uuid: '2a19'
+    icon: 'mdi:battery'
+    unit_of_measurement: '%'
+    device_class: battery
+    notify: true
+    update_interval: never
+    on_notify:
+      then:
+        - lambda: |-
+            ESP_LOGD("iTAG", "Battery: %d%%", x);
