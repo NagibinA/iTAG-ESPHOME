@@ -78,7 +78,7 @@ ble_client:
         - lambda: |-
             ESP_LOGI("iTAG", "✅ Активный режим: подключен");
             id(itag_active_rssi).update();
-            id(itag_battery).update();
+            id(itag_battery_raw).update();
     on_disconnect:
       then:
         - binary_sensor.template.publish:
@@ -101,6 +101,14 @@ globals:
     type: int
     restore_value: no
     initial_value: '-120'
+  - id: battery_100_pending
+    type: bool
+    initial_value: 'false'
+    restore_value: no
+  - id: battery_100_start_time
+    type: unsigned long
+    initial_value: '0'
+    restore_value: no
 
 binary_sensor:
   - platform: template
@@ -264,20 +272,64 @@ sensor:
         - lambda: |-
             ESP_LOGI("iTAG", "🔘 КНОПКА НАЖАТА!");
 
-  # ИСПРАВЛЕННЫЙ сенсор батареи
+  # Сырой сенсор батареи (получает нотификации)
   - platform: ble_client
     type: characteristic
     ble_client_id: itag_device
-    id: itag_battery
-    name: "Батарейка"
+    id: itag_battery_raw
+    internal: true
     service_uuid: '180f'
     characteristic_uuid: '2a19'
-    icon: 'mdi:battery'
-    unit_of_measurement: '%'
-    device_class: battery
-    notify: true               # <--- ЭТО КЛЮЧЕВОЙ ПАРАМЕТР
-    # update_interval: 300s    # <--- УДАЛИТЕ эту строку
-    on_notify:                 # <--- НОВАЯ автоматизация
+    notify: true
+    on_notify:
       then:
         - lambda: |-
-            ESP_LOGI("iTAG", "🔋 Уровень батареи (из Notify): %.0f%%", x);
+            float battery_value = x;
+            ESP_LOGD("iTAG", "🔋 Получено значение: %.0f%%", battery_value);
+            
+            // Если значение НЕ 100% - публикуем сразу И отменяем ожидание 100
+            if (battery_value < 100.0) {
+              if (id(battery_100_pending)) {
+                ESP_LOGD("iTAG", "⚠️ Отменяю ожидание 100%% (пришло реальное значение)");
+                id(battery_100_pending) = false;
+                id(battery_100_start_time) = 0;
+              }
+              id(itag_battery).publish_state(battery_value);
+              ESP_LOGI("iTAG", "🔋 Батарея: %.0f%% (мгновенно)", battery_value);
+            } 
+            // Если значение 100%
+            else {
+              // Если уже ждём 100 - ничего не делаем
+              if (id(battery_100_pending)) {
+                ESP_LOGD("iTAG", "🔋 Повторное 100%%, продолжаю ожидание");
+              } 
+              // Если не ждём - запускаем ожидание
+              else {
+                ESP_LOGD("iTAG", "🔋 Получено 100%%, начинаю ожидание 10 секунд");
+                id(battery_100_pending) = true;
+                id(battery_100_start_time) = millis();
+              }
+            }
+
+  # Публичный сенсор батареи
+  - platform: template
+    name: "Батарейка"
+    id: itag_battery
+    unit_of_measurement: '%'
+    icon: "mdi:battery"
+    device_class: battery
+    accuracy_decimals: 0
+
+# Интервал для проверки таймера (каждую секунду)
+interval:
+  - interval: 1s
+    then:
+      - lambda: |-
+          if (id(battery_100_pending) && id(battery_100_start_time) > 0) {
+            if (millis() - id(battery_100_start_time) >= 10000) {
+              ESP_LOGI("iTAG", "🔋 Прошло 10 секунд без значений <100%%, публикую 100%%");
+              id(itag_battery).publish_state(100.0);
+              id(battery_100_pending) = false;
+              id(battery_100_start_time) = 0;
+            }
+          }
