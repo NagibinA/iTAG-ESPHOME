@@ -1,8 +1,8 @@
 # iTAG BLE Tracker для Home Assistant
 
-|   ![](icon.png)|  ![](icon1.png)  | 
-|   -- | -- |
-|   <sub>Брелок с кнопкой</sub>  |<sub>Брелок без кнопки</sub> | 
+|   ![](icon.png)|  ![](icon2.png)  | ![](icon1.png)  | 
+|   -- | -- | -- |
+|   <sub>Брелок с кнопкой</sub>  |<sub>Брелок с кнопкой</sub> | <sub>Брелок без кнопки</sub> | 
   
 <br/>
 
