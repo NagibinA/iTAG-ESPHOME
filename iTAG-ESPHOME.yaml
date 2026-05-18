@@ -36,6 +36,16 @@ esphome:
 
 captive_portal:
 
+web_server:
+  version: 3  
+  port: 80
+  local: true
+  auth:
+    username: !secret user_web
+    password: !secret pass_web 
+
+
+
 esp32_ble_tracker:
   scan_parameters:
     interval: 300ms
@@ -173,12 +183,13 @@ switch:
       - lambda: |-
           ESP_LOGI("iTAG", "🤖 Автоматика ВЫКЛЮЧЕНА");
 
+button:
   # Поиск брелока
   - platform: template
     name: "Найти брелок"
     id: find_itag
     icon: "mdi:map-marker"
-    turn_on_action:
+    on_press:
       - if:
           condition:
             - switch.is_on: itag_active_mode
@@ -200,15 +211,13 @@ switch:
           else:
             - lambda: |-
                 ESP_LOGW("iTAG", "⚠️ Активный режим выключен или нет подключения");
-    turn_off_action:
-      - lambda: |-
-          ESP_LOGD("iTAG", "Поиск отключен");
 
   # Перезагрузка ESP32
   - platform: restart
     name: "Перезагрузить ESP32"
     id: restart_esp32
     entity_category: config
+    icon: "mdi:restart"
 
 sensor:
   - platform: template
